@@ -287,3 +287,48 @@ test('터치 두 번 누르기는 완료만 바꾸고 프로젝트 메뉴를 열
   await expect(page.getByRole('toolbar')).toHaveCount(0);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('daynote.v1')!).lines[1].schedule)).toBeNull();
 });
+
+test('선택 메뉴는 스크롤과 키보드 영역 변경 뒤에도 선택한 표현을 유지한다', async ({ page }) => {
+  await page.goto('/'); await page.getByRole('textbox').first().fill('26.11.1\n123플젝 작업');
+  const row = page.locator('textarea').nth(1);
+  await selectPrefix(page, row, '123플젝');
+  await page.evaluate(() => window.dispatchEvent(new Event('scroll')));
+  await expect(page.getByRole('button', { name: '프로젝트', exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(window.visualViewport!, 'height', { configurable: true, value: 330 });
+    window.visualViewport!.dispatchEvent(new Event('resize'));
+    window.visualViewport!.dispatchEvent(new Event('scroll'));
+  });
+  const toolbar = page.getByRole('toolbar', { name: '태스크 메뉴' });
+  await expect(toolbar).toBeVisible();
+  await expect.poll(async () => { const box = (await toolbar.boundingBox())!; return box.y + box.height; }).toBeLessThanOrEqual(330);
+  await page.getByRole('button', { name: '프로젝트', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '표준 프로젝트명' })).toHaveValue('123플젝');
+  await page.getByRole('button', { name: '등록', exact: true }).click();
+  await expect(row).toHaveValue('123플젝 작업');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('daynote.v1')!).lines[1].schedule)).toBeNull();
+});
+
+test('터치 기본 선택을 막지 않고 네이티브 선택 변경으로 프로젝트 메뉴를 갱신한다', async ({ page }) => {
+  await page.goto('/'); await page.getByRole('textbox').first().fill('26.11.1\n123플젝 작업');
+  const row = page.locator('textarea').nth(1);
+  await row.focus();
+  await row.dispatchEvent('pointerdown', { pointerType: 'touch', pointerId: 7, isPrimary: true, button: 0 });
+  expect(await row.evaluate(element => element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })))).toBe(true);
+  await row.dispatchEvent('pointercancel', { pointerType: 'touch', pointerId: 7 });
+  // Keep React's synthetic select path out of this check: native handles can
+  // change a textarea selection without the usual mouse/key event sequence.
+  await page.evaluate(() => {
+    document.addEventListener('selectionchange', event => event.stopImmediatePropagation(), { once: true });
+    const input = document.activeElement as HTMLTextAreaElement;
+    input.addEventListener('select', event => event.stopImmediatePropagation(), { once: true });
+    input.setSelectionRange(0, 5);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await expect(page.getByRole('button', { name: '프로젝트', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '프로젝트', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '표준 프로젝트명' })).toHaveValue('123플젝');
+  await page.getByRole('button', { name: '닫기', exact: true }).click();
+  await row.evaluate(element => { element.focus(); element.setSelectionRange(0, 0); });
+  await expect(page.getByRole('toolbar')).toHaveCount(0);
+});

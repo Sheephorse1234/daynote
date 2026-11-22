@@ -6,6 +6,7 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
   const [order, setOrder] = useState<string[] | null>(null);
   const [contextMenu, setContextMenu] = useState<{ id: string; text: string; left: number; top: number } | null>(null);
   const selectionBlockedUntil = useRef(0);
+  const pointerType = useRef('mouse');
   const [focused, setFocused] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const elements = useRef(new Map<string, HTMLTextAreaElement>());
@@ -45,15 +46,50 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
     const rect = input.getBoundingClientRect();
     const viewport = window.visualViewport;
     const bottom = (viewport?.height ?? window.innerHeight) + (viewport?.offsetTop ?? 0);
-    const top = Math.max((viewport?.offsetTop ?? 0) + 8, Math.min(rect.bottom + 5, bottom - 64));
-    setContextMenu({ id, text: selected, left: Math.max(8, Math.min(rect.left, window.innerWidth - 290)), top });
+    const leftEdge = viewport?.offsetLeft ?? 0;
+    // Keep the touch toolbar above the keyboard, away from Safari's selection bubble.
+    const anchor = pointerType.current === 'touch' && selected ? bottom - 64 : rect.bottom + 5;
+    const top = Math.max((viewport?.offsetTop ?? 0) + 8, Math.min(anchor, bottom - 64));
+    const left = Math.max(leftEdge + 8, Math.min(rect.left, leftEdge + (viewport?.width ?? window.innerWidth) - 290));
+    setContextMenu(previous => previous?.id === id && previous.text === selected && previous.left === left && previous.top === top
+      ? previous : { id, text: selected, left, top });
   }
+  const menuActions = useRef({ openMenu });
+  menuActions.current = { openMenu };
   useEffect(() => {
-    const dismiss = (event: Event) => { if (event.type !== 'pointerdown' || !root.current?.contains(event.target as Node)) setContextMenu(null); };
+    let frame = 0;
+    const syncSelection = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const entry = [...elements.current].find(([, input]) => input === document.activeElement);
+        if (!entry) return;
+        const [id, input] = entry;
+        if (input.selectionStart !== input.selectionEnd) menuActions.current.openMenu(id, true);
+        else setContextMenu(previous => previous?.text ? null : previous);
+      });
+    };
+    const dismiss = (event: Event) => { if (!root.current?.contains(event.target as Node)) setContextMenu(null); };
+    const reposition = () => { setContextMenu(null); syncSelection(); };
+    // Native selection handles do not consistently drive React's onSelect on iPad.
+    // Capture both document-level (older Safari) and textarea-level notifications.
+    document.addEventListener('selectionchange', syncSelection, true);
+    document.addEventListener('select', syncSelection, true);
     document.addEventListener('pointerdown', dismiss);
-    window.addEventListener('scroll', dismiss, true);
-    window.addEventListener('resize', dismiss);
-    return () => { document.removeEventListener('pointerdown', dismiss); window.removeEventListener('scroll', dismiss, true); window.removeEventListener('resize', dismiss); };
+    window.addEventListener('scroll', reposition, true);
+    window.addEventListener('resize', reposition);
+    const viewport = window.visualViewport;
+    viewport?.addEventListener('resize', reposition);
+    viewport?.addEventListener('scroll', reposition);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('selectionchange', syncSelection, true);
+      document.removeEventListener('select', syncSelection, true);
+      document.removeEventListener('pointerdown', dismiss);
+      window.removeEventListener('scroll', reposition, true);
+      window.removeEventListener('resize', reposition);
+      viewport?.removeEventListener('resize', reposition);
+      viewport?.removeEventListener('scroll', reposition);
+    };
   }, []);
   function insert(row: Line, start: number, end: number, text: string) {
     setContextMenu(null);
@@ -94,6 +130,7 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
     }
   }
   function pointerDown(event: PointerEvent<HTMLTextAreaElement>, row: Line) {
+    pointerType.current = event.pointerType;
     if (disabled || event.button !== 0 || !event.isPrimary) return;
     cancelTimer(); setContextMenu(null);
     press.current = { id: row.id, x: event.clientX, y: event.clientY, pointer: event.pointerId, moved: false, fired: false, heading: !!parseHeading(row.text) };
@@ -117,7 +154,11 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
   function pointerUp(event: PointerEvent<HTMLDivElement>) {
     cancelTimer(); const gesture = press.current; press.current = null;
     if (!gesture) return;
-    if (gesture.fired) { event.preventDefault(); event.stopPropagation(); if (gesture.heading) blockUntil.current = Date.now() + 650; return; }
+    if (gesture.fired) {
+      // Only pinning consumes release. Task selection must keep Safari's native handles.
+      if (gesture.heading) { event.preventDefault(); event.stopPropagation(); blockUntil.current = Date.now() + 650; }
+      return;
+    }
     if (gesture.moved || disabled) return;
     const row = lines.find(item => item.id === gesture.id);
     if (!row || parseHeading(row.text) || !row.text.trim()) return;
@@ -152,7 +193,7 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
           onPaste={event => { event.preventDefault(); insert(row, event.currentTarget.selectionStart, event.currentTarget.selectionEnd, event.clipboardData.getData('text/plain')); }}
           onPointerDown={event => pointerDown(event, row)}
           onSelect={() => openMenu(row.id, true)}
-          onContextMenu={event => { event.preventDefault(); if (!day) openMenu(row.id); }}
+          onContextMenu={event => { if (day || pointerType.current === 'mouse') event.preventDefault(); if (!day) openMenu(row.id); }}
           onDoubleClick={event => { event.preventDefault(); setContextMenu(null); selectionBlockedUntil.current = Date.now() + 400; }} />
       </div>;
     })}
