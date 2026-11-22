@@ -723,3 +723,19 @@ dialog > button:last-child {
   min-height: 0;
   flex: 1 1 28px;
 }
+.task-menu {
+  position: fixed;
+  display: flex;
+  gap: 3px;
+  padding: 4px;
+  max-width: calc(100vw - 16px);
+  background: #fafbf6;
+  border: 1px solid #d3ddc9;
+  border-radius: 10px;
+  box-shadow: 0 4px 18px #18332125;
+  z-index: 40;
+}
+.task-menu button { border: 0; font-size: 13px; white-space: nowrap; }
+.project-dialog { max-width: 400px; }
+.project-dialog label { display: block; font-size: 13px; margin: 12px 0; }
+.project-dialog input, .project-dialog select { display: block; width: 100%; margin-top: 5px; padding: 8px; border: 1px solid #d3ddc9; border-radius: 7px; background: white; color: inherit; }

@@ -1,16 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import { groupsOf, line, parseDate, sortedGroups, splitLine, type Line } from './model';
+import { groupsOf, line, displayText, parseHeading, sortedGroups, splitLine, type Line } from './model';
 
-type Props = { lines: Line[]; disabled: boolean; onChange: (lines: Line[]) => void; onUndo: () => void; onRedo: () => void; onNotice: (text: string) => void };
-export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNotice }: Props) {
+type Props = { lines: Line[]; disabled: boolean; onChange: (lines: Line[]) => void; onUndo: () => void; onRedo: () => void; onNotice: (text: string) => void; onSchedule: (id: string, enabled: boolean) => void; onProject: (id: string, text: string) => void };
+export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNotice, onSchedule, onProject }: Props) {
   const [order, setOrder] = useState<string[] | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ id: string; text: string; left: number; top: number } | null>(null);
+  const selectionBlockedUntil = useRef(0);
   const [focused, setFocused] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const elements = useRef(new Map<string, HTMLTextAreaElement>());
   const pendingFocus = useRef<{ id: string; caret: number } | null>(null);
   const composing = useRef(false);
   const longPress = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const press = useRef<{ id: string; x: number; y: number; pointer: number; moved: boolean; fired: boolean } | null>(null);
+  const press = useRef<{ id: string; x: number; y: number; pointer: number; moved: boolean; fired: boolean; heading: boolean } | null>(null);
   const lastTap = useRef<{ id: string; time: number; x: number; y: number } | null>(null);
   const blockUntil = useRef(0);
   const current = useRef({ lines, onChange, disabled });
@@ -31,10 +33,30 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
       element?.focus(); element?.setSelectionRange(next.caret, next.caret);
       pendingFocus.current = null;
     }
-  });
+  }, [lines, focused]);
   useEffect(() => () => clearTimeout(longPress.current), []);
   const cancelTimer = () => clearTimeout(longPress.current);
+  function openMenu(id: string, selectedOnly = false) {
+    if (disabled || composing.current || Date.now() < Math.max(blockUntil.current, selectionBlockedUntil.current)) return;
+    const input = elements.current.get(id), row = current.current.lines.find(item => item.id === id);
+    if (!input || !row || parseHeading(row.text) || !row.text.trim()) return;
+    const selected = input.value.slice(input.selectionStart, input.selectionEnd).trim();
+    if (selectedOnly && !selected) return;
+    const rect = input.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const bottom = (viewport?.height ?? window.innerHeight) + (viewport?.offsetTop ?? 0);
+    const top = Math.max((viewport?.offsetTop ?? 0) + 8, Math.min(rect.bottom + 5, bottom - 64));
+    setContextMenu({ id, text: selected, left: Math.max(8, Math.min(rect.left, window.innerWidth - 290)), top });
+  }
+  useEffect(() => {
+    const dismiss = (event: Event) => { if (event.type !== 'pointerdown' || !root.current?.contains(event.target as Node)) setContextMenu(null); };
+    document.addEventListener('pointerdown', dismiss);
+    window.addEventListener('scroll', dismiss, true);
+    window.addEventListener('resize', dismiss);
+    return () => { document.removeEventListener('pointerdown', dismiss); window.removeEventListener('scroll', dismiss, true); window.removeEventListener('resize', dismiss); };
+  }, []);
   function insert(row: Line, start: number, end: number, text: string) {
+    setContextMenu(null);
     const result = splitLine(lines, row.id, start, end, text);
     const newIds = result.lines.filter(item => !byId.has(item.id)).map(item => item.id);
     const ids = displayed.map(item => item.id), at = ids.indexOf(row.id);
@@ -43,13 +65,15 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
   }
   function keyDown(event: KeyboardEvent<HTMLTextAreaElement>, row: Line) {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Escape') { setContextMenu(null); return; }
+    if ((event.shiftKey && event.key === 'F10') || event.key === 'ContextMenu') { event.preventDefault(); openMenu(row.id); return; }
     const input = event.currentTarget, start = input.selectionStart, end = input.selectionEnd;
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
       event.preventDefault(); event.shiftKey ? onRedo() : onUndo(); return;
     }
     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
       event.preventDefault();
-      onChange(lines.map(item => item.id === row.id ? parseDate(row.text) ? { ...item, pinned: !item.pinned } : { ...item, done: !item.done } : item));
+      onChange(lines.map(item => item.id === row.id ? parseHeading(row.text) ? { ...item, pinned: !item.pinned } : { ...item, done: !item.done } : item));
       return;
     }
     if (event.key === 'Enter') { event.preventDefault(); insert(row, start, end, '\n'); return; }
@@ -71,13 +95,15 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
   }
   function pointerDown(event: PointerEvent<HTMLTextAreaElement>, row: Line) {
     if (disabled || event.button !== 0 || !event.isPrimary) return;
-    cancelTimer();
-    press.current = { id: row.id, x: event.clientX, y: event.clientY, pointer: event.pointerId, moved: false, fired: false };
-    if (!parseDate(row.text)) return;
+    cancelTimer(); setContextMenu(null);
+    press.current = { id: row.id, x: event.clientX, y: event.clientY, pointer: event.pointerId, moved: false, fired: false, heading: !!parseHeading(row.text) };
     longPress.current = setTimeout(() => {
       const gesture = press.current;
       if (!gesture || gesture.moved || current.current.disabled) return;
-      gesture.fired = true; blockUntil.current = Date.now() + 1000;
+      gesture.fired = true;
+      if (!gesture.heading) { lastTap.current = null; openMenu(gesture.id); return; }
+      setContextMenu(null); selectionBlockedUntil.current = Date.now() + 1000;
+      blockUntil.current = Date.now() + 1000;
       // Capture on the stable parent before reordering. Release/click cannot land on a moved paragraph.
       root.current?.setPointerCapture(gesture.pointer);
       (document.activeElement as HTMLElement)?.blur();
@@ -91,43 +117,50 @@ export default function Editor({ lines, disabled, onChange, onUndo, onRedo, onNo
   function pointerUp(event: PointerEvent<HTMLDivElement>) {
     cancelTimer(); const gesture = press.current; press.current = null;
     if (!gesture) return;
-    if (gesture.fired) { event.preventDefault(); event.stopPropagation(); blockUntil.current = Date.now() + 650; return; }
+    if (gesture.fired) { event.preventDefault(); event.stopPropagation(); if (gesture.heading) blockUntil.current = Date.now() + 650; return; }
     if (gesture.moved || disabled) return;
     const row = lines.find(item => item.id === gesture.id);
-    if (!row || parseDate(row.text) || !row.text.trim()) return;
+    if (!row || parseHeading(row.text) || !row.text.trim()) return;
+    const input = elements.current.get(row.id);
     const previous = lastTap.current, now = Date.now();
     if (previous && previous.id === row.id && now - previous.time < 320 && Math.hypot(previous.x - event.clientX, previous.y - event.clientY) < 24) {
-      event.preventDefault(); lastTap.current = null;
+      event.preventDefault(); lastTap.current = null; setContextMenu(null); selectionBlockedUntil.current = Date.now() + 400;
       onChange(lines.map(item => item.id === row.id ? { ...item, done: !item.done } : item));
       onNotice(row.done ? '완료를 취소했습니다.' : '이 줄을 완료했습니다.');
-    } else lastTap.current = { id: row.id, time: now, x: event.clientX, y: event.clientY };
+    } else if (!input || input.selectionStart === input.selectionEnd) lastTap.current = { id: row.id, time: now, x: event.clientX, y: event.clientY };
   }
   return <div ref={root} className="editor" aria-label="자유 메모 편집기"
-    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setOrder(null); setFocused(null); } }}
+    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setOrder(null); setFocused(null); setContextMenu(null); } }}
     onClickCapture={event => { if (Date.now() < blockUntil.current) { event.preventDefault(); event.stopPropagation(); (document.activeElement as HTMLElement)?.blur(); } }}
     onPointerDownCapture={event => { if (Date.now() < blockUntil.current) { event.preventDefault(); event.stopPropagation(); } }}
     onPointerMove={event => { const gesture = press.current; if (gesture && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 10) { gesture.moved = true; cancelTimer(); } }}
     onPointerUpCapture={pointerUp} onPointerCancel={() => { cancelTimer(); press.current = null; lastTap.current = null; }}>
     {displayed.map((row, index) => {
-      const day = parseDate(row.text);
+      const day = parseHeading(row.text);
       const nextContent = displayed.slice(index + 1).find(item => item.text.trim());
-      const separator = !row.text.trim() && nextContent && parseDate(nextContent.text) && focused !== row.id;
+      const separator = !row.text.trim() && nextContent && parseHeading(nextContent.text) && focused !== row.id;
       return <div key={row.id} className={`note-line ${day ? 'date-line' : ''} ${day && index > 0 ? 'group-gap' : ''} ${row.done && !day ? 'done' : ''} ${separator ? 'collapsed-blank' : ''}`}>
-        {row.id === freeStart && lines.some(item => parseDate(item.text)) && <p className="free-label">자유 메모</p>}
+        {row.id === freeStart && lines.some(item => parseHeading(item.text)) && <p className="free-label">자유 메모</p>}
         {day && row.pinned && <span className="pin-dot" title="상단 고정" aria-label="상단 고정">●</span>}
         <textarea ref={element => { if (element) elements.current.set(row.id, element); else elements.current.delete(row.id); }}
           aria-label={day ? `날짜 ${day.label}` : `메모 ${index + 1}`} rows={1} spellCheck={false} readOnly={disabled}
-          value={day && focused !== row.id ? day.label : row.text}
+          value={focused !== row.id ? displayText(row.text) : row.text}
           placeholder={lines.length === 1 ? '날짜나 생각을 적어보세요…' : ''}
-          onFocus={() => { if (Date.now() < blockUntil.current) { elements.current.get(row.id)?.blur(); return; } if (!order) setOrder(displayed.map(item => item.id)); setFocused(row.id); }}
-          onChange={event => { const text = event.target.value; if (text.includes('\n')) insert(row, 0, row.text.length, text); else onChange(lines.map(item => item.id === row.id ? { ...item, text } : item)); }}
+          onFocus={() => { if (Date.now() < blockUntil.current) { elements.current.get(row.id)?.blur(); return; } if (!order) setOrder(displayed.map(item => item.id)); setFocused(row.id); setContextMenu(null); }}
+          onChange={event => { setContextMenu(null); const text = event.target.value; if (text.includes('\n')) insert(row, 0, row.text.length, text); else onChange(lines.map(item => item.id === row.id ? { ...item, text } : item)); }}
           onKeyDown={event => keyDown(event, row)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
           onPaste={event => { event.preventDefault(); insert(row, event.currentTarget.selectionStart, event.currentTarget.selectionEnd, event.clipboardData.getData('text/plain')); }}
           onPointerDown={event => pointerDown(event, row)}
-          onContextMenu={event => { if (day) event.preventDefault(); }}
-          onDoubleClick={event => { event.preventDefault(); }} />
+          onSelect={() => openMenu(row.id, true)}
+          onContextMenu={event => { event.preventDefault(); if (!day) openMenu(row.id); }}
+          onDoubleClick={event => { event.preventDefault(); setContextMenu(null); selectionBlockedUntil.current = Date.now() + 400; }} />
       </div>;
     })}
+    {contextMenu && !disabled && byId.has(contextMenu.id) && <div className="task-menu" role="toolbar" aria-label="태스크 메뉴" data-no-swipe="true" style={{ left: contextMenu.left, top: contextMenu.top }}
+      onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }}>
+      <button onClick={() => { onSchedule(contextMenu.id, !byId.get(contextMenu.id)!.schedule); setContextMenu(null); }}>{byId.get(contextMenu.id)!.schedule ? '일정에서 해제' : '일정에 추가'}</button>
+      {contextMenu.text && <button onClick={() => { onProject(contextMenu.id, contextMenu.text); setContextMenu(null); }}>프로젝트</button>}
+    </div>}
     <button className="write-more" disabled={disabled} onClick={() => {
       const added = line();
       const after = lines.findIndex(row => row.id === displayed.at(-1)?.id) + 1;
